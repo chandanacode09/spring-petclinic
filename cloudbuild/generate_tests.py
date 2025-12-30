@@ -54,20 +54,40 @@ def get_skill_context_gatherer():
         return None, None
 
 
-def inject_test_samples_imports(test_code: str, rich_context: dict) -> str:
-    """Inject missing TestSamples static imports into generated test code.
+def inject_missing_imports(test_code: str, rich_context: dict) -> str:
+    """Inject missing imports into generated test code.
 
-    The LLM often uses TestSamples methods but forgets to add static imports.
-    This post-processor scans the generated code and adds missing imports.
+    The LLM often forgets to add imports. This post-processor:
+    1. Adds the target class import
+    2. Adds dependency class imports
+    3. Adds TestSamples static imports if used
     """
     if not rich_context:
         return test_code
 
     target = rich_context.get('target_class', {})
+    target_fqn = target.get('fqn', '')
+    target_name = target.get('name', '')
     package = target.get('package', '')
     imports_needed = set()
 
-    # Check for target class TestSamples usage
+    # Always add target class import if referenced and not imported
+    if target_name and target_name in test_code:
+        target_import = f"import {target_fqn};"
+        if target_import not in test_code:
+            imports_needed.add(target_import)
+
+    # Add dependency imports if they're used but not imported
+    deps = rich_context.get('dependencies', {})
+    for dep_name, dep_info in deps.items():
+        if not dep_info.get('external', False):
+            dep_fqn = dep_info.get('fqn', '')
+            if dep_fqn and dep_name in test_code:
+                dep_import = f"import {dep_fqn};"
+                if dep_import not in test_code:
+                    imports_needed.add(dep_import)
+
+    # Check for TestSamples usage
     samples = rich_context.get('existing_test_samples')
     if samples:
         samples_class = samples.get('class_name', '')
@@ -79,7 +99,6 @@ def inject_test_samples_imports(test_code: str, rich_context: dict) -> str:
 
     # Check for dependency TestSamples usage
     dep_samples = rich_context.get('dependency_samples', {})
-    deps = rich_context.get('dependencies', {})
     for dep_name, ds in dep_samples.items():
         if ds.get('has_samples'):
             for method_name in ds.get('sample_methods', []):
@@ -107,6 +126,14 @@ def inject_test_samples_imports(test_code: str, rich_context: dict) -> str:
             if imp not in test_code:
                 lines.insert(last_import_idx + 1, imp)
                 last_import_idx += 1
+    elif 'package ' in test_code:
+        # No imports exist, add after package statement
+        for i, line in enumerate(lines):
+            if line.strip().startswith('package '):
+                lines.insert(i + 1, '')
+                for imp in sorted(imports_needed):
+                    lines.insert(i + 2, imp)
+                break
 
     return '\n'.join(lines)
 
@@ -198,9 +225,16 @@ Pet pet = new Pet("Max", owner);  // WRONG if constructor is Pet()
 {context_text}
 {sample_instructions}
 
+REQUIRED IMPORTS - include these in your test:
+- import """ + target.get('fqn', '') + """;  // The class being tested
+- import org.junit.jupiter.api.Test;
+- import static org.assertj.core.api.Assertions.*;
+- import java.time.LocalDate; (if using dates)
+- Import any dependency classes shown in DEPENDENCIES section
+
 Generate a complete, compilable JUnit 5 test class with:
-1. Package declaration matching the source class
-2. ALL imports (only import classes shown in the context)
+1. Package declaration: package """ + target.get('package', '') + """;
+2. ALL imports including the class under test and its dependencies
 3. At least 3-4 meaningful test methods using ONLY the constructors and methods shown above
 
 Output ONLY the Java code, no explanations or markdown."""
@@ -229,7 +263,7 @@ Output ONLY the Java code, no explanations or markdown."""
         test_code = test_code.strip()
 
         # Post-process: inject missing TestSamples imports
-        test_code = inject_test_samples_imports(test_code, rich_context)
+        test_code = inject_missing_imports(test_code, rich_context)
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         return test_code, None, elapsed_ms
