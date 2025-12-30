@@ -14,6 +14,7 @@
 substitutions:
   _LLM_MODEL: 'google/gemma-3-4b-it:free'
   _MAX_CLASSES: '20'
+  _BASE_BRANCH: 'main'
 
 options:
   logging: CLOUD_LOGGING_ONLY
