@@ -28,11 +28,18 @@ steps:
     args:
       - '-c'
       - |
-        echo "Fetching base branch..."
-        git fetch origin ${_BASE_BRANCH:-main} --depth=100
+        echo "Fetching full git history..."
+        git fetch --unshallow origin || git fetch origin
+        git fetch origin ${_BASE_BRANCH:-main}
+
+        echo "Current HEAD:"
+        git log --oneline -1
+
+        echo "Base branch HEAD:"
+        git log --oneline -1 origin/${_BASE_BRANCH:-main}
 
         echo "Finding changed Java files..."
-        git diff --name-only "origin/${_BASE_BRANCH:-main}"...HEAD \
+        git diff --name-only "origin/${_BASE_BRANCH:-main}...HEAD" \
           | grep '\.java$$' \
           | grep -v '/test/' \
           | grep -v 'Test\.java$$' \
