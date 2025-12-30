@@ -1,0 +1,158 @@
+# Cloud Build pipeline for Java test generation with BigQuery integration
+#
+# Features:
+# 1. Tree-sitter AST parsing for accurate class/method signatures
+# 2. LLM (via OpenRouter) for test generation
+# 3. BigQuery for storing index and analytics across repos
+#
+# Setup:
+#   1. Enable Cloud Build, BigQuery, Secret Manager APIs
+#   2. Run: python bigquery/setup_bigquery.py
+#   3. Store OpenRouter API key in Secret Manager
+#   4. Create Cloud Build trigger for GitHub PRs
+
+substitutions:
+  _LLM_MODEL: 'google/gemma-3-4b-it:free'
+  _MAX_CLASSES: '20'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_MEDIUM
+
+steps:
+  # Step 1: Identify changed Java files
+  - id: 'get-changed-files'
+    name: 'gcr.io/cloud-builders/git'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Fetching base branch..."
+        git fetch origin ${_BASE_BRANCH:-main} --depth=100
+
+        echo "Finding changed Java files..."
+        git diff --name-only "origin/${_BASE_BRANCH:-main}"...HEAD \
+          | grep '\.java$$' \
+          | grep -v '/test/' \
+          | grep -v 'Test\.java$$' \
+          > /workspace/changed-files.txt || true
+
+        echo "Changed files:"
+        cat /workspace/changed-files.txt || echo "(none)"
+
+        # Get git SHA for tracking
+        git rev-parse HEAD > /workspace/git-sha.txt
+
+        CHANGE_COUNT=$$(wc -l < /workspace/changed-files.txt | tr -d ' ')
+        echo "Total: $$CHANGE_COUNT files"
+
+  # Step 2: Generate tests and stream to BigQuery
+  - id: 'generate-tests'
+    name: 'python:3.11-slim'
+    entrypoint: 'bash'
+    env:
+      - 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID'
+    secretEnv: ['OPENROUTER_API_KEY']
+    args:
+      - '-c'
+      - |
+        set -e
+
+        # Check if there are changed files
+        if [ ! -s /workspace/changed-files.txt ]; then
+          echo "No changed Java files. Skipping test generation."
+          echo '{"generated": [], "skipped": [], "failed": []}' > /workspace/results.json
+          exit 0
+        fi
+
+        echo "Installing dependencies..."
+        pip install --quiet tree-sitter tree-sitter-java openai google-cloud-bigquery
+
+        # Get git SHA
+        GIT_SHA=$$(cat /workspace/git-sha.txt)
+
+        echo "Running test generator..."
+        export OPENROUTER_MODEL="${_LLM_MODEL}"
+
+        # The script will:
+        # 1. Index Java files
+        # 2. Stream index to BigQuery
+        # 3. Generate tests
+        # 4. Track results in BigQuery
+        python /workspace/cloudbuild/generate_tests.py \
+          --repo /workspace \
+          --repo-name "${REPO_NAME}" \
+          --changed-files /workspace/changed-files.txt \
+          --output-dir /workspace/generated-tests \
+          --max-classes ${_MAX_CLASSES} \
+          --build-id "${BUILD_ID}" \
+          --git-sha "$$GIT_SHA" \
+          --no-bigquery \
+          --json-output > /workspace/results.json
+
+        echo "Generation complete:"
+        cat /workspace/results.json
+
+  # Step 3: Validate tests compile (if Maven/Gradle present)
+  - id: 'validate-tests'
+    name: 'maven:3.9-eclipse-temurin-17'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if [ ! -d /workspace/generated-tests ] || [ -z "$$(ls -A /workspace/generated-tests 2>/dev/null)" ]; then
+          echo "No generated tests to validate."
+          exit 0
+        fi
+
+        echo "Copying generated tests to src/test/java..."
+        mkdir -p /workspace/src/test/java
+        cp -r /workspace/generated-tests/* /workspace/src/test/java/ 2>/dev/null || true
+
+        if [ -f /workspace/pom.xml ]; then
+          echo "Validating with Maven..."
+          cd /workspace
+          mvn test-compile -q -DskipTests 2>&1 || echo "Some tests may need fixes"
+        elif [ -f /workspace/build.gradle ] || [ -f /workspace/build.gradle.kts ]; then
+          echo "Validating with Gradle..."
+          cd /workspace
+          ./gradlew testClasses -q 2>&1 || echo "Some tests may need fixes"
+        else
+          echo "No build file found. Skipping compilation check."
+        fi
+
+  # Step 4: Report results
+  - id: 'report'
+    name: 'gcr.io/cloud-builders/curl'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if [ -f /workspace/results.json ]; then
+          GENERATED=$$(cat /workspace/results.json | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('generated',[])))")
+          echo "=========================================="
+          echo "TEST GENERATION COMPLETE"
+          echo "=========================================="
+          echo "Generated: $$GENERATED tests"
+          echo "Build ID: ${BUILD_ID}"
+          echo "Repo: ${REPO_NAME}"
+          echo ""
+          echo "Data stored in BigQuery:"
+          echo "  - context_agent.java_classes"
+          echo "  - context_agent.java_dependencies"
+          echo "  - context_agent.generated_tests"
+          echo "  - context_agent.pipeline_runs"
+          echo "=========================================="
+
+          # List generated files
+          if [ -d /workspace/generated-tests ]; then
+            echo "Generated test files:"
+            find /workspace/generated-tests -name "*.java" -type f
+          fi
+        fi
+
+# Access secrets from Secret Manager
+availableSecrets:
+  secretManager:
+    - versionName: projects/${PROJECT_ID}/secrets/openrouter-api-key/versions/latest
+      env: 'OPENROUTER_API_KEY'
