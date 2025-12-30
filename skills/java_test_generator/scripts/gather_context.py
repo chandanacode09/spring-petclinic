@@ -393,6 +393,13 @@ def format_context_for_prompt(context: Dict[str, Any]) -> str:
     """Format the context as a readable string for LLM prompts."""
     lines = []
 
+    # Add guardrails section at the top
+    lines.append("!" * 60)
+    lines.append("IMPORTANT: ONLY use classes, methods, and imports shown below!")
+    lines.append("DO NOT invent or assume any APIs that are not explicitly listed.")
+    lines.append("!" * 60)
+    lines.append("")
+
     target = context.get('target_class', {})
     lines.append("=" * 60)
     lines.append("TARGET CLASS")
@@ -480,16 +487,31 @@ def format_context_for_prompt(context: Dict[str, Any]) -> str:
                 for ctor in dep_info.get('constructors', []):
                     lines.append(f"      Constructor: {ctor}")
 
-    # Existing test samples
+    # Existing test samples - with explicit warning if none exist
     samples = context.get('existing_test_samples')
-    if samples:
-        lines.append("\n" + "=" * 60)
-        lines.append("EXISTING TEST SAMPLES")
-        lines.append("=" * 60)
+    lines.append("\n" + "=" * 60)
+    lines.append("TEST SAMPLES STATUS")
+    lines.append("=" * 60)
+    if samples and samples.get('methods'):
         lines.append(f"Class: {samples.get('class_name')}")
+        lines.append("Available sample methods (USE THESE):")
         for method in samples.get('methods', []):
             lines.append(f"  - {method.get('name')}():")
             lines.append(f"      return {method.get('return_expression')}")
+    else:
+        lines.append("*** NO TestSamples class exists for this class ***")
+        lines.append("*** Create test objects using constructors and setters ***")
+        lines.append("*** DO NOT import or use any *TestSamples classes ***")
+        lines.append("")
+        lines.append("HOW TO CREATE TEST OBJECTS:")
+        target_ctors = target.get('constructors', [])
+        if target_ctors:
+            lines.append(f"  Use constructor: {target.get('name')}()")
+            for ctor in target_ctors[:3]:
+                lines.append(f"    - {ctor}")
+        else:
+            lines.append(f"  {target.get('name')} obj = new {target.get('name')}();")
+        lines.append("  Then use setter methods to populate fields.")
 
     # Dependency samples
     dep_samples = context.get('dependency_samples', {})
