@@ -17,7 +17,7 @@ substitutions:
   _BASE_BRANCH: 'main'
 
 options:
-  logging: GCS_ONLY
+  logging: CLOUD_LOGGING_ONLY
   machineType: E2_MEDIUM
 
 steps:
@@ -98,8 +98,21 @@ steps:
           --no-bigquery \
           --json-output > /workspace/results.json
 
-        echo "Generation complete:"
+        echo "=== Generation complete ==="
         cat /workspace/results.json
+
+        echo ""
+        echo "=== Generated test files ==="
+        find /workspace/generated-tests -name "*.java" -type f 2>/dev/null || echo "No test files found"
+
+        echo ""
+        echo "=== First generated test content ==="
+        FIRST_TEST=$$(find /workspace/generated-tests -name "*.java" -type f 2>/dev/null | head -1)
+        if [ -n "$$FIRST_TEST" ]; then
+          cat "$$FIRST_TEST"
+        else
+          echo "No tests generated"
+        fi
 
   # Step 3: Validate tests compile (if Maven/Gradle present)
   - id: 'validate-tests'
