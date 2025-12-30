@@ -114,7 +114,7 @@ steps:
           echo "No tests generated"
         fi
 
-  # Step 3: Validate tests compile (if Maven/Gradle present)
+  # Step 3: Format and validate tests (if Maven/Gradle present)
   - id: 'validate-tests'
     name: 'maven:3.9-eclipse-temurin-17'
     entrypoint: 'bash'
@@ -131,8 +131,13 @@ steps:
         cp -r /workspace/generated-tests/* /workspace/src/test/java/ 2>/dev/null || true
 
         if [ -f /workspace/pom.xml ]; then
-          echo "Validating with Maven..."
           cd /workspace
+
+          # Apply Spring formatting if the plugin exists
+          echo "Applying Spring code formatting..."
+          mvn spring-javaformat:apply -q 2>&1 || echo "Formatting skipped (plugin not found)"
+
+          echo "Validating with Maven..."
           mvn test-compile -q -DskipTests 2>&1 || echo "Some tests may need fixes"
         elif [ -f /workspace/build.gradle ] || [ -f /workspace/build.gradle.kts ]; then
           echo "Validating with Gradle..."
