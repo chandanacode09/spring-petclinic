@@ -17,7 +17,7 @@ substitutions:
   _BASE_BRANCH: 'main'
 
 options:
-  logging: CLOUD_LOGGING_ONLY
+  logging: GCS_ONLY
   machineType: E2_MEDIUM
 
 steps:
