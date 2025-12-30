@@ -149,39 +149,46 @@ def generate_test_with_llm_rich(cls_name: str, rich_context: dict, format_contex
     samples = rich_context.get('existing_test_samples')
     dep_samples = rich_context.get('dependency_samples', {})
 
-    # Build sample usage instructions
+    # Build sample usage instructions - ONLY if they actually exist
     sample_instructions = ""
-    if samples:
+    has_any_samples = False
+
+    if samples and samples.get('methods'):
+        has_any_samples = True
         sample_methods = [m.get('name') for m in samples.get('methods', [])]
         if sample_methods:
-            sample_instructions += f"\n\nUSE THESE SAMPLE METHODS (add static import for {samples.get('class_name')}):\n"
+            sample_instructions += f"\n\nUSE THESE EXISTING SAMPLE METHODS (add static import for {samples.get('class_name')}):\n"
             for m in sample_methods[:5]:
                 sample_instructions += f"  - {m}()\n"
 
     for dep_name, ds in dep_samples.items():
-        if ds.get('has_samples'):
+        if ds.get('has_samples') and ds.get('sample_methods'):
+            has_any_samples = True
             sample_instructions += f"\nFor {dep_name}, use: {', '.join(ds.get('sample_methods', [])[:3])}\n"
+
+    # Different prompt based on whether TestSamples exist
+    if has_any_samples:
+        sample_rule = "3. USE the TestSamples methods listed below with proper static imports"
+    else:
+        sample_rule = "3. Create test objects directly using constructors and setters - NO TestSamples exist in this repo"
 
     prompt = f"""You are an expert Java developer. Generate a complete JUnit 5 unit test class.
 
 CRITICAL RULES:
 1. ONLY use constructors and methods from the context below - DO NOT invent APIs
 2. Use AssertJ assertions (assertThat) - this repo uses AssertJ
-3. If TestSamples exist, USE THEM with static imports
+{sample_rule}
 4. For entities, test relationships properly (add/remove sync)
-5. Include ALL necessary imports including static imports for TestSamples
+5. Include ALL necessary imports
 6. Follow the AAA pattern (Arrange, Act, Assert)
-
-IMPORTANT - STATIC IMPORTS:
-If you use any method like getBankAccountSample1(), you MUST add:
-  import static <package>.<ClassName>TestSamples.*;
+7. DO NOT import or use any classes that are not shown in the context below
 
 {context_text}
 {sample_instructions}
 
 Generate a complete, compilable JUnit 5 test class with:
 1. Package declaration matching the source class
-2. ALL imports including static imports for TestSamples
+2. ALL imports (only import classes shown in the context)
 3. At least 3-4 meaningful test methods
 4. Tests for relationships if this is an entity
 
