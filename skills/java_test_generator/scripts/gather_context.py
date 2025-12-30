@@ -84,6 +84,70 @@ def determine_class_kind(cls: Dict[str, Any], schema: Optional[Dict[str, Any]]) 
     return 'class'
 
 
+def resolve_inherited_members(cls: Dict[str, Any], index: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve inherited methods and fields from parent classes.
+
+    Returns a new class dict with inherited members merged in.
+    """
+    classes = index.get('classes', {})
+
+    # Start with the class's own members
+    all_methods = list(cls.get('methods', []))
+    all_fields = list(cls.get('fields', []))
+    all_constructors = list(cls.get('constructors', []))
+
+    # Walk up the inheritance chain
+    parent_name = cls.get('extends')
+    visited = set()
+
+    while parent_name and parent_name not in visited:
+        visited.add(parent_name)
+
+        # Find parent class
+        parent_cls = None
+        for fqn, c in classes.items():
+            if c.get('name') == parent_name:
+                parent_cls = c
+                break
+
+        if not parent_cls:
+            break
+
+        # Add parent's methods (prepend so they appear after own methods)
+        parent_methods = parent_cls.get('methods', [])
+        for m in parent_methods:
+            # Check if not already overridden
+            method_name = m.get('name') if isinstance(m, dict) else str(m).split('(')[0]
+            existing_names = [
+                (em.get('name') if isinstance(em, dict) else str(em).split('(')[0])
+                for em in all_methods
+            ]
+            if method_name not in existing_names:
+                all_methods.append(m)
+
+        # Add parent's fields
+        parent_fields = parent_cls.get('fields', [])
+        for f in parent_fields:
+            field_name = f.get('name') if isinstance(f, dict) else str(f)
+            existing_names = [
+                (ef.get('name') if isinstance(ef, dict) else str(ef))
+                for ef in all_fields
+            ]
+            if field_name not in existing_names:
+                all_fields.append(f)
+
+        # Move to grandparent
+        parent_name = parent_cls.get('extends')
+
+    # Return enriched class
+    enriched = dict(cls)
+    enriched['methods'] = all_methods
+    enriched['fields'] = all_fields
+    enriched['inherited_from'] = list(visited)
+
+    return enriched
+
+
 def extract_dependencies(cls: Dict[str, Any], index: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """Extract dependencies from fields and constructor parameters."""
     deps = {}
@@ -349,10 +413,32 @@ def gather_context(
     if not cls:
         return {'error': f'Class {class_name} not found in index'}
 
+    # Resolve inherited members from parent classes
+    cls = resolve_inherited_members(cls, index)
+
     class_fqn = cls.get('fqn', '')
     schema = get_database_schema(index, class_fqn)
     kind = determine_class_kind(cls, schema)
     dependencies = extract_dependencies(cls, index)
+
+    # Also resolve inherited members for dependencies
+    enriched_deps = {}
+    for dep_name, dep_info in dependencies.items():
+        if not dep_info.get('external', False):
+            # Find the dependency class and resolve its inheritance
+            dep_cls = None
+            for fqn, c in index.get('classes', {}).items():
+                if c.get('name') == dep_name:
+                    dep_cls = resolve_inherited_members(c, index)
+                    break
+            if dep_cls:
+                dep_info = dict(dep_info)
+                dep_info['methods'] = [
+                    m.get('name') if isinstance(m, dict) else str(m).split('(')[0]
+                    for m in dep_cls.get('methods', [])[:10]
+                ]
+        enriched_deps[dep_name] = dep_info
+    dependencies = enriched_deps
 
     context = {
         'target_class': {
@@ -366,7 +452,8 @@ def gather_context(
             'annotations': cls.get('annotations', []),
             'extends': cls.get('extends'),
             'implements': cls.get('implements', []),
-            'source_file': cls.get('source_file')
+            'source_file': cls.get('source_file'),
+            'inherited_from': cls.get('inherited_from', [])
         },
         'target_method': None,
         'database_schema': schema,
@@ -411,6 +498,8 @@ def format_context_for_prompt(context: Dict[str, Any]) -> str:
 
     if target.get('extends'):
         lines.append(f"Extends: {target.get('extends')}")
+    if target.get('inherited_from'):
+        lines.append(f"Inherits from: {' -> '.join(target.get('inherited_from', []))}")
     if target.get('implements'):
         lines.append(f"Implements: {', '.join(target.get('implements', []))}")
 
@@ -475,7 +564,7 @@ def format_context_for_prompt(context: Dict[str, Any]) -> str:
     deps = context.get('dependencies', {})
     if deps:
         lines.append("\n" + "=" * 60)
-        lines.append("DEPENDENCIES")
+        lines.append("DEPENDENCIES (use these methods, DO NOT invent others)")
         lines.append("=" * 60)
         for dep_name, dep_info in deps.items():
             if dep_info.get('external'):
@@ -486,6 +575,10 @@ def format_context_for_prompt(context: Dict[str, Any]) -> str:
                 lines.append(f"      Kind: {dep_info.get('kind')}")
                 for ctor in dep_info.get('constructors', []):
                     lines.append(f"      Constructor: {ctor}")
+                # Show available methods (including inherited)
+                methods = dep_info.get('methods', [])
+                if methods:
+                    lines.append(f"      Available methods: {', '.join(methods)}")
 
     # Existing test samples - with explicit warning if none exist
     samples = context.get('existing_test_samples')
