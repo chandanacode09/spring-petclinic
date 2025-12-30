@@ -210,16 +210,28 @@ CRITICAL RULES - YOU MUST FOLLOW THESE EXACTLY:
 5. DO NOT import or use any classes that are not shown in the context below
 6. If a constructor shows "ClassName()" (no arguments), DO NOT try to pass arguments
 
-EXAMPLE - CORRECT way to create entity with no-arg constructor:
+EXAMPLE - CORRECT way to create entities with no-arg constructor:
 ```java
+// Creating a Pet
 Pet pet = new Pet();
 pet.setName("Max");
 pet.setBirthDate(LocalDate.now());
+
+// Creating a PetType (it's an ENTITY, not an enum!)
+PetType dogType = new PetType();
+dogType.setName("dog");
+pet.setType(dogType);
+
+// Creating a Visit
+Visit visit = new Visit();
+visit.setDate(LocalDate.now());
+visit.setDescription("checkup");
 ```
 
 EXAMPLE - WRONG (DO NOT DO THIS):
 ```java
-Pet pet = new Pet("Max", owner);  // WRONG if constructor is Pet()
+Pet pet = new Pet("Max", owner);  // WRONG - constructor has no args
+pet.setType(PetType.DOG);  // WRONG - PetType is NOT an enum, it's an entity!
 ```
 
 {context_text}
