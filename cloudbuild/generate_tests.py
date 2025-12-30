@@ -174,14 +174,26 @@ def generate_test_with_llm_rich(cls_name: str, rich_context: dict, format_contex
 
     prompt = f"""You are an expert Java developer. Generate a complete JUnit 5 unit test class.
 
-CRITICAL RULES:
-1. ONLY use constructors and methods from the context below - DO NOT invent APIs
-2. Use AssertJ assertions (assertThat) - this repo uses AssertJ
+CRITICAL RULES - YOU MUST FOLLOW THESE EXACTLY:
+1. ONLY use constructors shown in the CONSTRUCTORS section - DO NOT invent constructors with arguments if only no-arg constructor is shown
+2. ONLY use methods shown in the METHODS section - DO NOT call methods that are not listed
+3. Use AssertJ assertions (assertThat) - this repo uses AssertJ
 {sample_rule}
-4. For entities, test relationships properly (add/remove sync)
-5. Include ALL necessary imports
-6. Follow the AAA pattern (Arrange, Act, Assert)
-7. DO NOT import or use any classes that are not shown in the context below
+4. For entities with no-arg constructor, use: Object obj = new Object(); obj.setField(value);
+5. DO NOT import or use any classes that are not shown in the context below
+6. If a constructor shows "ClassName()" (no arguments), DO NOT try to pass arguments
+
+EXAMPLE - CORRECT way to create entity with no-arg constructor:
+```java
+Pet pet = new Pet();
+pet.setName("Max");
+pet.setBirthDate(LocalDate.now());
+```
+
+EXAMPLE - WRONG (DO NOT DO THIS):
+```java
+Pet pet = new Pet("Max", owner);  // WRONG if constructor is Pet()
+```
 
 {context_text}
 {sample_instructions}
@@ -189,8 +201,7 @@ CRITICAL RULES:
 Generate a complete, compilable JUnit 5 test class with:
 1. Package declaration matching the source class
 2. ALL imports (only import classes shown in the context)
-3. At least 3-4 meaningful test methods
-4. Tests for relationships if this is an entity
+3. At least 3-4 meaningful test methods using ONLY the constructors and methods shown above
 
 Output ONLY the Java code, no explanations or markdown."""
 
