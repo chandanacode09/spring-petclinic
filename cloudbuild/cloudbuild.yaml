@@ -149,13 +149,13 @@ steps:
 
   # Step 4: Report results
   - id: 'report'
-    name: 'gcr.io/cloud-builders/curl'
+    name: 'python:3.11-slim'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
         if [ -f /workspace/results.json ]; then
-          GENERATED=$$(cat /workspace/results.json | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('generated',[])))")
+          GENERATED=$$(python3 -c "import json; print(len(json.load(open('/workspace/results.json')).get('generated',[])))")
           echo "=========================================="
           echo "TEST GENERATION COMPLETE"
           echo "=========================================="
