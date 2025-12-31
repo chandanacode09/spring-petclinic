@@ -138,51 +138,148 @@ def inject_missing_imports(test_code: str, rich_context: dict) -> str:
     return '\n'.join(lines)
 
 
-def fix_common_hallucinations(test_code: str) -> str:
-    """Fix common LLM hallucination patterns in generated tests.
+def get_all_methods_for_class(class_name: str, index) -> set:
+    """Get all methods for a class including inherited ones from the AST index."""
+    all_methods = set()
 
-    The free LLM tier often invents methods that don't exist.
-    This post-processor catches and fixes common patterns.
+    # Handle both JavaIndex object and dict
+    if hasattr(index, 'classes'):
+        classes = index.classes
+    else:
+        classes = index.get('classes', {})
+
+    # Find the class
+    cls = None
+    for fqn, c in classes.items():
+        c_name = c.name if hasattr(c, 'name') else c.get('name')
+        if c_name == class_name:
+            cls = c
+            break
+
+    if not cls:
+        return all_methods
+
+    # Add own methods
+    methods = cls.methods if hasattr(cls, 'methods') else cls.get('methods', [])
+    for m in methods:
+        if hasattr(m, 'name'):
+            all_methods.add(m.name)
+        elif isinstance(m, dict):
+            all_methods.add(m.get('name'))
+
+    # Walk inheritance chain
+    parent_name = cls.extends if hasattr(cls, 'extends') else cls.get('extends')
+    visited = set()
+
+    while parent_name and parent_name not in visited:
+        visited.add(parent_name)
+        for fqn, c in classes.items():
+            c_name = c.name if hasattr(c, 'name') else c.get('name')
+            if c_name == parent_name:
+                parent_methods = c.methods if hasattr(c, 'methods') else c.get('methods', [])
+                for m in parent_methods:
+                    if hasattr(m, 'name'):
+                        all_methods.add(m.name)
+                    elif isinstance(m, dict):
+                        all_methods.add(m.get('name'))
+                parent_name = c.extends if hasattr(c, 'extends') else c.get('extends')
+                break
+        else:
+            break
+
+    return all_methods
+
+
+def fix_hallucinations_with_ast(test_code: str, index, rich_context: dict) -> str:
+    """Fix LLM hallucinations using actual AST data.
+
+    Instead of hardcoding fixes, this uses the AST index to:
+    1. Detect method calls on known types
+    2. Check if the method exists
+    3. Suggest alternatives from the actual class hierarchy
     """
     import re
 
-    # Common Spring PetClinic hallucinations
-    replacements = [
-        # setTypeId -> setId (PetType inherits from BaseEntity)
-        (r'\.setTypeId\s*\(\s*(\d+)L?\s*\)', r'.setId(\1)'),
-        (r'\.setTypeId\s*\(\s*(\w+)\s*\)', r'.setId(\1)'),
-        # setTypeName -> setName (PetType inherits from NamedEntity)
-        (r'\.setTypeName\s*\(', '.setName('),
-        # getTypeId -> getId
-        (r'\.getTypeId\s*\(\s*\)', '.getId()'),
-        # getTypeName -> getName
-        (r'\.getTypeName\s*\(\s*\)', '.getName()'),
-        # PetType.DOG/CAT -> new PetType() with setName
-        (r'PetType\.(DOG|CAT|BIRD|SNAKE|HAMSTER)', 'createPetType("\\1".toLowerCase())'),
-    ]
+    if not index:
+        return test_code
 
-    for pattern, replacement in replacements:
-        test_code = re.sub(pattern, replacement, test_code)
+    # Build a map of what methods exist for each class
+    deps = rich_context.get('dependencies', {}) if rich_context else {}
 
-    # If we replaced PetType.XXX, we need to add a helper method
-    if 'createPetType(' in test_code and 'private PetType createPetType' not in test_code:
-        # Find the class closing brace and insert helper before it
-        helper = '''
-    private PetType createPetType(String name) {
-        PetType type = new PetType();
-        type.setName(name);
-        return type;
-    }
+    # Infer variable types from declarations
+    var_types = {}
+    decl_pattern = r'(\w+)\s+(\w+)\s*='
+    for match in re.finditer(decl_pattern, test_code):
+        type_name = match.group(1)
+        var_name = match.group(2)
+        if type_name not in ['String', 'int', 'long', 'boolean', 'var', 'List', 'Set']:
+            var_types[var_name] = type_name
+
+    # Find all method calls and check against AST
+    call_pattern = r'(\w+)\.(\w+)\s*\('
+    replacements = []
+
+    for match in re.finditer(call_pattern, test_code):
+        var_name = match.group(1)
+        method_name = match.group(2)
+
+        if var_name not in var_types:
+            continue
+
+        type_name = var_types[var_name]
+        available_methods = get_all_methods_for_class(type_name, index)
+
+        if available_methods and method_name not in available_methods:
+            # Try to find a similar method
+            base_name = method_name.replace('Type', '').replace('Name', '')
+            for avail in available_methods:
+                if base_name.lower() in avail.lower() or avail.lower() in base_name.lower():
+                    replacements.append((
+                        f'{var_name}.{method_name}(',
+                        f'{var_name}.{avail}('
+                    ))
+                    break
+
+    # Apply replacements
+    for old, new in replacements:
+        test_code = test_code.replace(old, new)
+
+    # Fix entity-as-enum pattern (e.g., PetType.DOG)
+    # Get all entity class names from the index
+    entity_names = set()
+    classes = index.classes if hasattr(index, 'classes') else index.get('classes', {})
+    for fqn, c in classes.items():
+        c_name = c.name if hasattr(c, 'name') else c.get('name')
+        if c_name:
+            entity_names.add(c_name)
+
+    for entity in entity_names:
+        enum_pattern = rf'{entity}\.([A-Z][A-Z_]+)'
+        if re.search(enum_pattern, test_code):
+            # Replace with factory method
+            test_code = re.sub(
+                enum_pattern,
+                rf'create{entity}("\1".toLowerCase())',
+                test_code
+            )
+            # Add helper method if not present
+            helper_name = f'create{entity}'
+            if helper_name + '(' in test_code and f'private {entity} {helper_name}' not in test_code:
+                helper = f'''
+    private {entity} {helper_name}(String name) {{
+        {entity} obj = new {entity}();
+        obj.setName(name);
+        return obj;
+    }}
 '''
-        # Insert before the last closing brace
-        last_brace = test_code.rfind('}')
-        if last_brace > 0:
-            test_code = test_code[:last_brace] + helper + test_code[last_brace:]
+                last_brace = test_code.rfind('}')
+                if last_brace > 0:
+                    test_code = test_code[:last_brace] + helper + test_code[last_brace:]
 
     return test_code
 
 
-def generate_test_with_llm_rich(cls_name: str, rich_context: dict, format_context_fn) -> tuple:
+def generate_test_with_llm_rich(cls_name: str, rich_context: dict, format_context_fn, index=None) -> tuple:
     """Generate test using LLM with rich context from the java_test_generator skill.
 
     This uses the skill's context gathering which includes:
@@ -326,8 +423,8 @@ Output ONLY the Java code, no explanations or markdown."""
 
         test_code = test_code.strip()
 
-        # Post-process: fix common hallucinations
-        test_code = fix_common_hallucinations(test_code)
+        # Post-process: fix hallucinations using AST data
+        test_code = fix_hallucinations_with_ast(test_code, index, rich_context)
 
         # Post-process: inject missing imports
         test_code = inject_missing_imports(test_code, rich_context)
@@ -713,7 +810,7 @@ def main():
                     if rich_context and 'error' not in rich_context:
                         print(f"    Using rich context (TestSamples, schemas)", file=sys.stderr)
                         test_code, error, generation_time_ms = generate_test_with_llm_rich(
-                            cls_name, rich_context, format_context_for_prompt
+                            cls_name, rich_context, format_context_for_prompt, index
                         )
                         if test_code:
                             llm_used = True
