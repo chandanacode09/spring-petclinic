@@ -338,50 +338,41 @@ def generate_test_with_llm_rich(cls_name: str, rich_context: dict, format_contex
     if has_any_samples:
         sample_rule = "3. USE the TestSamples methods listed below with proper static imports"
     else:
-        sample_rule = "3. Create test objects directly using constructors and setters - NO TestSamples exist in this repo"
+        sample_rule = "3. Create test objects directly using constructors and setters"
+
+    # Build dynamic examples from AST for dependency classes
+    dep_examples = []
+    deps = rich_context.get('dependencies', {})
+    for dep_name, dep_info in list(deps.items())[:3]:
+        if not dep_info.get('external', False):
+            dep_methods = get_all_methods_for_class(dep_name, index) if index else set()
+            if dep_methods:
+                setters = [m for m in dep_methods if m.startswith('set')][:3]
+                if setters:
+                    example_lines = [f"{dep_name[0].lower()}{dep_name[1:]} = new {dep_name}();"]
+                    for setter in setters:
+                        field = setter[3].lower() + setter[4:] if len(setter) > 3 else ""
+                        example_lines.append(f"{dep_name[0].lower()}{dep_name[1:]}.{setter}({field}Value);")
+                    dep_examples.append('\n'.join(example_lines))
+
+    dynamic_examples = ""
+    if dep_examples:
+        dynamic_examples = "\n\nEXAMPLE - Creating objects (based on actual available methods):\n```java\n"
+        dynamic_examples += "\n\n".join(dep_examples[:2])
+        dynamic_examples += "\n```"
 
     prompt = f"""You are an expert Java developer. Generate a complete JUnit 5 unit test class.
 
 CRITICAL RULES - YOU MUST FOLLOW THESE EXACTLY:
 1. ONLY use constructors shown in the CONSTRUCTORS section - DO NOT invent constructors with arguments if only no-arg constructor is shown
 2. ONLY use methods shown in the METHODS section - DO NOT call methods that are not listed
-3. Use AssertJ assertions (assertThat) - this repo uses AssertJ
+3. Use AssertJ assertions (assertThat)
 {sample_rule}
-4. For entities with no-arg constructor, use: Object obj = new Object(); obj.setField(value);
+4. For classes with no-arg constructor, use: Object obj = new Object(); then call setters
 5. DO NOT import or use any classes that are not shown in the context below
 6. If a constructor shows "ClassName()" (no arguments), DO NOT try to pass arguments
-
-EXAMPLE - CORRECT way to create entities with no-arg constructor:
-```java
-// Creating a Pet
-Pet pet = new Pet();
-pet.setName("Max");
-pet.setBirthDate(LocalDate.now());
-
-// Creating a PetType (it's an ENTITY, not an enum!)
-PetType dogType = new PetType();
-dogType.setName("dog");
-pet.setType(dogType);
-
-// Creating a Visit
-Visit visit = new Visit();
-visit.setDate(LocalDate.now());
-visit.setDescription("checkup");
-```
-
-EXAMPLE - WRONG (DO NOT DO THIS):
-```java
-Pet pet = new Pet("Max", owner);  // WRONG - constructor has no args
-pet.setType(PetType.DOG);  // WRONG - PetType is NOT an enum, it's an entity!
-petType.setTypeId(1L);  // WRONG - there is NO setTypeId method! Use setId() instead
-petType.setTypeName("dog");  // WRONG - there is NO setTypeName method! Use setName() instead
-```
-
-CRITICAL: For PetType, ONLY these methods exist:
-- new PetType() - no-arg constructor
-- setId(Integer id) - inherited from BaseEntity
-- setName(String name) - inherited from NamedEntity
-- getId(), getName(), isNew(), toString()
+7. DO NOT treat entity classes as enums - they are instantiated with new ClassName()
+{dynamic_examples}
 
 {context_text}
 {sample_instructions}
