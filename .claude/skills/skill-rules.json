@@ -1,0 +1,62 @@
+{
+    "version": "1.0",
+    "description": "Skill activation triggers for Spring PetClinic Java test generation",
+    "skills": {
+        "java-test-generator": {
+            "type": "guardrail",
+            "enforcement": "suggest",
+            "priority": "critical",
+            "description": "Generate JUnit 5 tests using AST-grounded context. Prevents method hallucination.",
+            "promptTriggers": {
+                "keywords": [
+                    "test",
+                    "junit",
+                    "unit test",
+                    "generate test",
+                    "write test",
+                    "create test",
+                    "testing",
+                    "test case",
+                    "test class",
+                    "PetTest",
+                    "OwnerTest",
+                    "VetTest",
+                    "VisitTest"
+                ],
+                "intentPatterns": [
+                    "(create|write|generate|add|implement).*?test",
+                    "(how to|how do I).*?test",
+                    "test.*?(pet|owner|vet|visit|entity)",
+                    "(junit|assertj|mockito).*?"
+                ]
+            },
+            "fileTriggers": {
+                "pathPatterns": [
+                    "src/test/java/**/*.java",
+                    "**/*Test.java",
+                    "**/*Tests.java"
+                ],
+                "contentPatterns": [
+                    "@Test",
+                    "assertThat",
+                    "assertEquals",
+                    "JUnit"
+                ]
+            },
+            "blockMessage": "⚠️ JAVA TEST GENERATION\n\n📋 REQUIRED ACTIONS:\n1. Use Skill: 'java-test-generator'\n2. Run: python3 .claude/skills/java-test-generator/scripts/get_class_context.py --class <ClassName>\n3. Use ONLY methods shown in the context\n4. Validate before saving: python3 .claude/skills/java-test-generator/scripts/validate_test.py --file <test.java>\n\nReason: Prevent method hallucination (e.g., setTypeId doesn't exist, use setId)"
+        }
+    },
+    "notes": {
+        "enforcement_types": {
+            "suggest": "Skill suggestion appears, doesn't block",
+            "block": "Requires skill before proceeding",
+            "warn": "Shows warning, allows proceeding"
+        },
+        "priority_levels": {
+            "critical": "Always trigger - test generation needs AST context",
+            "high": "Trigger for most matches",
+            "medium": "Trigger for clear matches",
+            "low": "Optional"
+        }
+    }
+}
