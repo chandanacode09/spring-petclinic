@@ -138,6 +138,50 @@ def inject_missing_imports(test_code: str, rich_context: dict) -> str:
     return '\n'.join(lines)
 
 
+def fix_common_hallucinations(test_code: str) -> str:
+    """Fix common LLM hallucination patterns in generated tests.
+
+    The free LLM tier often invents methods that don't exist.
+    This post-processor catches and fixes common patterns.
+    """
+    import re
+
+    # Common Spring PetClinic hallucinations
+    replacements = [
+        # setTypeId -> setId (PetType inherits from BaseEntity)
+        (r'\.setTypeId\s*\(\s*(\d+)L?\s*\)', r'.setId(\1)'),
+        (r'\.setTypeId\s*\(\s*(\w+)\s*\)', r'.setId(\1)'),
+        # setTypeName -> setName (PetType inherits from NamedEntity)
+        (r'\.setTypeName\s*\(', '.setName('),
+        # getTypeId -> getId
+        (r'\.getTypeId\s*\(\s*\)', '.getId()'),
+        # getTypeName -> getName
+        (r'\.getTypeName\s*\(\s*\)', '.getName()'),
+        # PetType.DOG/CAT -> new PetType() with setName
+        (r'PetType\.(DOG|CAT|BIRD|SNAKE|HAMSTER)', 'createPetType("\\1".toLowerCase())'),
+    ]
+
+    for pattern, replacement in replacements:
+        test_code = re.sub(pattern, replacement, test_code)
+
+    # If we replaced PetType.XXX, we need to add a helper method
+    if 'createPetType(' in test_code and 'private PetType createPetType' not in test_code:
+        # Find the class closing brace and insert helper before it
+        helper = '''
+    private PetType createPetType(String name) {
+        PetType type = new PetType();
+        type.setName(name);
+        return type;
+    }
+'''
+        # Insert before the last closing brace
+        last_brace = test_code.rfind('}')
+        if last_brace > 0:
+            test_code = test_code[:last_brace] + helper + test_code[last_brace:]
+
+    return test_code
+
+
 def generate_test_with_llm_rich(cls_name: str, rich_context: dict, format_context_fn) -> tuple:
     """Generate test using LLM with rich context from the java_test_generator skill.
 
@@ -232,7 +276,15 @@ EXAMPLE - WRONG (DO NOT DO THIS):
 ```java
 Pet pet = new Pet("Max", owner);  // WRONG - constructor has no args
 pet.setType(PetType.DOG);  // WRONG - PetType is NOT an enum, it's an entity!
+petType.setTypeId(1L);  // WRONG - there is NO setTypeId method! Use setId() instead
+petType.setTypeName("dog");  // WRONG - there is NO setTypeName method! Use setName() instead
 ```
+
+CRITICAL: For PetType, ONLY these methods exist:
+- new PetType() - no-arg constructor
+- setId(Integer id) - inherited from BaseEntity
+- setName(String name) - inherited from NamedEntity
+- getId(), getName(), isNew(), toString()
 
 {context_text}
 {sample_instructions}
@@ -274,7 +326,10 @@ Output ONLY the Java code, no explanations or markdown."""
 
         test_code = test_code.strip()
 
-        # Post-process: inject missing TestSamples imports
+        # Post-process: fix common hallucinations
+        test_code = fix_common_hallucinations(test_code)
+
+        # Post-process: inject missing imports
         test_code = inject_missing_imports(test_code, rich_context)
 
         elapsed_ms = int((time.time() - start_time) * 1000)
