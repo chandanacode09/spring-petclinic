@@ -54,20 +54,40 @@ def get_skill_context_gatherer():
         return None, None
 
 
-def inject_test_samples_imports(test_code: str, rich_context: dict) -> str:
-    """Inject missing TestSamples static imports into generated test code.
+def inject_missing_imports(test_code: str, rich_context: dict) -> str:
+    """Inject missing imports into generated test code.
 
-    The LLM often uses TestSamples methods but forgets to add static imports.
-    This post-processor scans the generated code and adds missing imports.
+    The LLM often forgets to add imports. This post-processor:
+    1. Adds the target class import
+    2. Adds dependency class imports
+    3. Adds TestSamples static imports if used
     """
     if not rich_context:
         return test_code
 
     target = rich_context.get('target_class', {})
+    target_fqn = target.get('fqn', '')
+    target_name = target.get('name', '')
     package = target.get('package', '')
     imports_needed = set()
 
-    # Check for target class TestSamples usage
+    # Always add target class import if referenced and not imported
+    if target_name and target_name in test_code:
+        target_import = f"import {target_fqn};"
+        if target_import not in test_code:
+            imports_needed.add(target_import)
+
+    # Add dependency imports if they're used but not imported
+    deps = rich_context.get('dependencies', {})
+    for dep_name, dep_info in deps.items():
+        if not dep_info.get('external', False):
+            dep_fqn = dep_info.get('fqn', '')
+            if dep_fqn and dep_name in test_code:
+                dep_import = f"import {dep_fqn};"
+                if dep_import not in test_code:
+                    imports_needed.add(dep_import)
+
+    # Check for TestSamples usage
     samples = rich_context.get('existing_test_samples')
     if samples:
         samples_class = samples.get('class_name', '')
@@ -79,7 +99,6 @@ def inject_test_samples_imports(test_code: str, rich_context: dict) -> str:
 
     # Check for dependency TestSamples usage
     dep_samples = rich_context.get('dependency_samples', {})
-    deps = rich_context.get('dependencies', {})
     for dep_name, ds in dep_samples.items():
         if ds.get('has_samples'):
             for method_name in ds.get('sample_methods', []):
@@ -107,11 +126,160 @@ def inject_test_samples_imports(test_code: str, rich_context: dict) -> str:
             if imp not in test_code:
                 lines.insert(last_import_idx + 1, imp)
                 last_import_idx += 1
+    elif 'package ' in test_code:
+        # No imports exist, add after package statement
+        for i, line in enumerate(lines):
+            if line.strip().startswith('package '):
+                lines.insert(i + 1, '')
+                for imp in sorted(imports_needed):
+                    lines.insert(i + 2, imp)
+                break
 
     return '\n'.join(lines)
 
 
-def generate_test_with_llm_rich(cls_name: str, rich_context: dict, format_context_fn) -> tuple:
+def get_all_methods_for_class(class_name: str, index) -> set:
+    """Get all methods for a class including inherited ones from the AST index."""
+    all_methods = set()
+
+    # Handle both JavaIndex object and dict
+    if hasattr(index, 'classes'):
+        classes = index.classes
+    else:
+        classes = index.get('classes', {})
+
+    # Find the class
+    cls = None
+    for fqn, c in classes.items():
+        c_name = c.name if hasattr(c, 'name') else c.get('name')
+        if c_name == class_name:
+            cls = c
+            break
+
+    if not cls:
+        return all_methods
+
+    # Add own methods
+    methods = cls.methods if hasattr(cls, 'methods') else cls.get('methods', [])
+    for m in methods:
+        if hasattr(m, 'name'):
+            all_methods.add(m.name)
+        elif isinstance(m, dict):
+            all_methods.add(m.get('name'))
+
+    # Walk inheritance chain
+    parent_name = cls.extends if hasattr(cls, 'extends') else cls.get('extends')
+    visited = set()
+
+    while parent_name and parent_name not in visited:
+        visited.add(parent_name)
+        for fqn, c in classes.items():
+            c_name = c.name if hasattr(c, 'name') else c.get('name')
+            if c_name == parent_name:
+                parent_methods = c.methods if hasattr(c, 'methods') else c.get('methods', [])
+                for m in parent_methods:
+                    if hasattr(m, 'name'):
+                        all_methods.add(m.name)
+                    elif isinstance(m, dict):
+                        all_methods.add(m.get('name'))
+                parent_name = c.extends if hasattr(c, 'extends') else c.get('extends')
+                break
+        else:
+            break
+
+    return all_methods
+
+
+def fix_hallucinations_with_ast(test_code: str, index, rich_context: dict) -> str:
+    """Fix LLM hallucinations using actual AST data.
+
+    Instead of hardcoding fixes, this uses the AST index to:
+    1. Detect method calls on known types
+    2. Check if the method exists
+    3. Suggest alternatives from the actual class hierarchy
+    """
+    import re
+
+    if not index:
+        return test_code
+
+    # Build a map of what methods exist for each class
+    deps = rich_context.get('dependencies', {}) if rich_context else {}
+
+    # Infer variable types from declarations
+    var_types = {}
+    decl_pattern = r'(\w+)\s+(\w+)\s*='
+    for match in re.finditer(decl_pattern, test_code):
+        type_name = match.group(1)
+        var_name = match.group(2)
+        if type_name not in ['String', 'int', 'long', 'boolean', 'var', 'List', 'Set']:
+            var_types[var_name] = type_name
+
+    # Find all method calls and check against AST
+    call_pattern = r'(\w+)\.(\w+)\s*\('
+    replacements = []
+
+    for match in re.finditer(call_pattern, test_code):
+        var_name = match.group(1)
+        method_name = match.group(2)
+
+        if var_name not in var_types:
+            continue
+
+        type_name = var_types[var_name]
+        available_methods = get_all_methods_for_class(type_name, index)
+
+        if available_methods and method_name not in available_methods:
+            # Try to find a similar method
+            base_name = method_name.replace('Type', '').replace('Name', '')
+            for avail in available_methods:
+                if base_name.lower() in avail.lower() or avail.lower() in base_name.lower():
+                    replacements.append((
+                        f'{var_name}.{method_name}(',
+                        f'{var_name}.{avail}('
+                    ))
+                    break
+
+    # Apply replacements
+    for old, new in replacements:
+        test_code = test_code.replace(old, new)
+
+    # Fix entity-as-enum pattern (e.g., PetType.DOG)
+    # Get all entity class names from the index
+    entity_names = set()
+    classes = index.classes if hasattr(index, 'classes') else index.get('classes', {})
+    for fqn, c in classes.items():
+        c_name = c.name if hasattr(c, 'name') else c.get('name')
+        if c_name:
+            entity_names.add(c_name)
+
+    for entity in entity_names:
+        enum_pattern = rf'{entity}\.([A-Z][A-Z_]+)'
+        if re.search(enum_pattern, test_code):
+            # Replace with factory method
+            test_code = re.sub(
+                enum_pattern,
+                rf'create{entity}("\1".toLowerCase())',
+                test_code
+            )
+            # Add helper method if not present
+            helper_name = f'create{entity}'
+            if helper_name + '(' in test_code and f'private {entity} {helper_name}' not in test_code:
+                helper = f'''
+    private {entity} {helper_name}(String name) {{
+        {entity} obj = new {entity}();
+        obj.setName(name);
+        return obj;
+    }}
+'''
+                last_brace = test_code.rfind('}')
+                if last_brace > 0:
+                    test_code = test_code[:last_brace] + helper + test_code[last_brace:]
+
+    return test_code
+
+
+def generate_test_with_llm_rich(cls_name: str, rich_context: dict, format_context_fn, index=None) -> tuple:
     """Generate test using LLM with rich context from the java_test_generator skill.
 
     This uses the skill's context gathering which includes:
@@ -149,41 +317,77 @@ def generate_test_with_llm_rich(cls_name: str, rich_context: dict, format_contex
     samples = rich_context.get('existing_test_samples')
     dep_samples = rich_context.get('dependency_samples', {})
 
-    # Build sample usage instructions
+    # Build sample usage instructions - ONLY if they actually exist
     sample_instructions = ""
-    if samples:
+    has_any_samples = False
+
+    if samples and samples.get('methods'):
+        has_any_samples = True
         sample_methods = [m.get('name') for m in samples.get('methods', [])]
         if sample_methods:
-            sample_instructions += f"\n\nUSE THESE SAMPLE METHODS (add static import for {samples.get('class_name')}):\n"
+            sample_instructions += f"\n\nUSE THESE EXISTING SAMPLE METHODS (add static import for {samples.get('class_name')}):\n"
             for m in sample_methods[:5]:
                 sample_instructions += f"  - {m}()\n"
 
     for dep_name, ds in dep_samples.items():
-        if ds.get('has_samples'):
+        if ds.get('has_samples') and ds.get('sample_methods'):
+            has_any_samples = True
             sample_instructions += f"\nFor {dep_name}, use: {', '.join(ds.get('sample_methods', [])[:3])}\n"
+
+    # Different prompt based on whether TestSamples exist
+    if has_any_samples:
+        sample_rule = "3. USE the TestSamples methods listed below with proper static imports"
+    else:
+        sample_rule = "3. Create test objects directly using constructors and setters"
+
+    # Build dynamic examples from AST for dependency classes
+    dep_examples = []
+    deps = rich_context.get('dependencies', {})
+    for dep_name, dep_info in list(deps.items())[:3]:
+        if not dep_info.get('external', False):
+            dep_methods = get_all_methods_for_class(dep_name, index) if index else set()
+            if dep_methods:
+                setters = [m for m in dep_methods if m.startswith('set')][:3]
+                if setters:
+                    example_lines = [f"{dep_name[0].lower()}{dep_name[1:]} = new {dep_name}();"]
+                    for setter in setters:
+                        field = setter[3].lower() + setter[4:] if len(setter) > 3 else ""
+                        example_lines.append(f"{dep_name[0].lower()}{dep_name[1:]}.{setter}({field}Value);")
+                    dep_examples.append('\n'.join(example_lines))
+
+    dynamic_examples = ""
+    if dep_examples:
+        dynamic_examples = "\n\nEXAMPLE - Creating objects (based on actual available methods):\n```java\n"
+        dynamic_examples += "\n\n".join(dep_examples[:2])
+        dynamic_examples += "\n```"
 
     prompt = f"""You are an expert Java developer. Generate a complete JUnit 5 unit test class.
 
-CRITICAL RULES:
-1. ONLY use constructors and methods from the context below - DO NOT invent APIs
-2. Use AssertJ assertions (assertThat) - this repo uses AssertJ
-3. If TestSamples exist, USE THEM with static imports
-4. For entities, test relationships properly (add/remove sync)
-5. Include ALL necessary imports including static imports for TestSamples
-6. Follow the AAA pattern (Arrange, Act, Assert)
-
-IMPORTANT - STATIC IMPORTS:
-If you use any method like getBankAccountSample1(), you MUST add:
-  import static <package>.<ClassName>TestSamples.*;
+CRITICAL RULES - YOU MUST FOLLOW THESE EXACTLY:
+1. ONLY use constructors shown in the CONSTRUCTORS section - DO NOT invent constructors with arguments if only no-arg constructor is shown
+2. ONLY use methods shown in the METHODS section - DO NOT call methods that are not listed
+3. Use AssertJ assertions (assertThat)
+{sample_rule}
+4. For classes with no-arg constructor, use: Object obj = new Object(); then call setters
+5. DO NOT import or use any classes that are not shown in the context below
+6. If a constructor shows "ClassName()" (no arguments), DO NOT try to pass arguments
+7. DO NOT treat entity classes as enums - they are instantiated with new ClassName()
+{dynamic_examples}
 
 {context_text}
 {sample_instructions}
 
+REQUIRED IMPORTS - include these in your test:
+- import """ + target.get('fqn', '') + """;  // The class being tested
+- import org.junit.jupiter.api.Test;
+- import static org.assertj.core.api.Assertions.*;
+- import java.time.LocalDate; (if using dates)
+- Import any dependency classes shown in DEPENDENCIES section
+
 Generate a complete, compilable JUnit 5 test class with:
-1. Package declaration matching the source class
-2. ALL imports including static imports for TestSamples
-3. At least 3-4 meaningful test methods
-4. Tests for relationships if this is an entity
+1. Package declaration: package """ + target.get('package', '') + """;
+2. ALL imports including the class under test and its dependencies
+3. At least 3-4 meaningful test methods using ONLY the constructors and methods shown above
 
 Output ONLY the Java code, no explanations or markdown."""
 
@@ -210,8 +414,11 @@ Output ONLY the Java code, no explanations or markdown."""
 
         test_code = test_code.strip()
 
-        # Post-process: inject missing TestSamples imports
-        test_code = inject_test_samples_imports(test_code, rich_context)
+        # Post-process: fix hallucinations using AST data
+        test_code = fix_hallucinations_with_ast(test_code, index, rich_context)
+
+        # Post-process: inject missing imports
+        test_code = inject_missing_imports(test_code, rich_context)
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         return test_code, None, elapsed_ms
@@ -594,7 +801,7 @@ def main():
                     if rich_context and 'error' not in rich_context:
                         print(f"    Using rich context (TestSamples, schemas)", file=sys.stderr)
                         test_code, error, generation_time_ms = generate_test_with_llm_rich(
-                            cls_name, rich_context, format_context_for_prompt
+                            cls_name, rich_context, format_context_for_prompt, index
                         )
                         if test_code:
                             llm_used = True

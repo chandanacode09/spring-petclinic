@@ -14,6 +14,7 @@
 substitutions:
   _LLM_MODEL: 'google/gemma-3-4b-it:free'
   _MAX_CLASSES: '20'
+  _BASE_BRANCH: 'main'
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -27,11 +28,18 @@ steps:
     args:
       - '-c'
       - |
-        echo "Fetching base branch..."
-        git fetch origin ${_BASE_BRANCH:-main} --depth=100
+        echo "Fetching full git history..."
+        git fetch --unshallow origin || git fetch origin
+        git fetch origin ${_BASE_BRANCH:-main}
+
+        echo "Current HEAD:"
+        git log --oneline -1
+
+        echo "Base branch HEAD:"
+        git log --oneline -1 origin/${_BASE_BRANCH:-main}
 
         echo "Finding changed Java files..."
-        git diff --name-only "origin/${_BASE_BRANCH:-main}"...HEAD \
+        git diff --name-only "origin/${_BASE_BRANCH:-main}...HEAD" \
           | grep '\.java$$' \
           | grep -v '/test/' \
           | grep -v 'Test\.java$$' \
@@ -90,10 +98,23 @@ steps:
           --no-bigquery \
           --json-output > /workspace/results.json
 
-        echo "Generation complete:"
+        echo "=== Generation complete ==="
         cat /workspace/results.json
 
-  # Step 3: Validate tests compile (if Maven/Gradle present)
+        echo ""
+        echo "=== Generated test files ==="
+        find /workspace/generated-tests -name "*.java" -type f 2>/dev/null || echo "No test files found"
+
+        echo ""
+        echo "=== First generated test content ==="
+        FIRST_TEST=$$(find /workspace/generated-tests -name "*.java" -type f 2>/dev/null | head -1)
+        if [ -n "$$FIRST_TEST" ]; then
+          cat "$$FIRST_TEST"
+        else
+          echo "No tests generated"
+        fi
+
+  # Step 3: Format and validate tests (if Maven/Gradle present)
   - id: 'validate-tests'
     name: 'maven:3.9-eclipse-temurin-17'
     entrypoint: 'bash'
@@ -110,8 +131,13 @@ steps:
         cp -r /workspace/generated-tests/* /workspace/src/test/java/ 2>/dev/null || true
 
         if [ -f /workspace/pom.xml ]; then
-          echo "Validating with Maven..."
           cd /workspace
+
+          # Apply Spring formatting if the plugin exists
+          echo "Applying Spring code formatting..."
+          mvn spring-javaformat:apply -q 2>&1 || echo "Formatting skipped (plugin not found)"
+
+          echo "Validating with Maven..."
           mvn test-compile -q -DskipTests 2>&1 || echo "Some tests may need fixes"
         elif [ -f /workspace/build.gradle ] || [ -f /workspace/build.gradle.kts ]; then
           echo "Validating with Gradle..."
@@ -123,13 +149,13 @@ steps:
 
   # Step 4: Report results
   - id: 'report'
-    name: 'gcr.io/cloud-builders/curl'
+    name: 'python:3.11-slim'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
         if [ -f /workspace/results.json ]; then
-          GENERATED=$$(cat /workspace/results.json | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('generated',[])))")
+          GENERATED=$$(python3 -c "import json; print(len(json.load(open('/workspace/results.json')).get('generated',[])))")
           echo "=========================================="
           echo "TEST GENERATION COMPLETE"
           echo "=========================================="

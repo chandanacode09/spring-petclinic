@@ -94,6 +94,14 @@ public class Owner extends Person {
 		return this.pets;
 	}
 
+	/**
+	 * Return the number of pets owned by this owner.
+	 * @return the count of pets
+	 */
+	public int getPetCount() {
+		return this.pets.size();
+	}
+
 	public void addPet(Pet pet) {
 		if (pet.isNew()) {
 			getPets().add(pet);
